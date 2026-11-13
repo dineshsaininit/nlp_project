@@ -1,0 +1,12 @@
+nltk
+scikit-learn
+numpy
+pandas
+scipy
+matplotlib
+reportlab
+pypdf
+python-docx
+networkx
+plotly
+streamlit
