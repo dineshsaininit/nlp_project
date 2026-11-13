@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Document Scanner</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/vendor/plotly.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<div id="busy" class="busy"></div>
+<div class="shell">
+  <aside class="side">
+    <header class="mast">
+      <a href="#overview" class="mast-title">Document<br>Scanner</a>
+      <p class="mast-sub">Reading many files at once with plain NLP. Tokens, TF-IDF, cosine similarity, POS tags.</p>
+    </header>
+
+    <nav id="nav" class="nav"></nav>
+
+    <section class="files">
+      <h2 class="side-label">Your documents <span id="doc-count" class="count">0</span></h2>
+      <label id="drop" class="drop">
+        <input id="file-input" type="file" multiple accept=".txt,.md,.csv,.pdf,.docx,.html,.htm">
+        <strong>Drop files here</strong>
+        <span>or click to choose. PDF, Word, TXT, MD, CSV, HTML</span>
+      </label>
+      <ul id="file-list" class="file-list"></ul>
+
+      <details class="fold">
+        <summary>Paste text instead</summary>
+        <label class="field">Name<input id="paste-name" type="text" value="my_notes.txt"></label>
+        <label class="field">Text<textarea id="paste-text" rows="5" placeholder="Paste any text here"></textarea></label>
+        <button id="paste-add" class="btn small">Add as a document</button>
+      </details>
+
+      <details class="fold">
+        <summary>Settings</summary>
+        <label class="field">Skill similarity needed <output id="out-skill">0.60</output>
+          <input id="set-skill" type="range" min="0.4" max="0.9" step="0.05" value="0.6"></label>
+        <label class="field">Similarity to count as a version <output id="out-version">0.35</output>
+          <input id="set-version" type="range" min="0.1" max="0.9" step="0.05" value="0.35"></label>
+        <label class="field">Similarity to group topics <output id="out-topic">0.12</output>
+          <input id="set-topic" type="range" min="0.05" max="0.6" step="0.01" value="0.12"></label>
+        <button id="settings-apply" class="btn small">Apply settings</button>
+      </details>
+
+      <button id="clear-all" class="text-button">Remove all documents</button>
+    </section>
+  </aside>
+
+  <main id="main" class="main"></main>
+</div>
+<div id="toast" class="toast" role="status"></div>
+</body>
+</html>

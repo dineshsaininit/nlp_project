@@ -1,3 +1,4 @@
+flask
 nltk
 scikit-learn
 numpy
@@ -9,4 +10,3 @@ pypdf
 python-docx
 networkx
 plotly
-streamlit
