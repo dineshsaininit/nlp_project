@@ -256,7 +256,7 @@ def alignment(corpus, old_text, new_text):
     new_sentences = [engine.strip_numbering(s) for s in engine.split_sentences(new_text)]
     if not old_sentences or not new_sentences or len(old_sentences) * len(new_sentences) > 6400:
         return None
-    steps, matrix = engine.needleman_wunsch(old_sentences, new_sentences, corpus.vectorizer)
+    steps, matrix = engine.needleman_wunsch(old_sentences, new_sentences, engine.vectorizer_for(corpus, old_text, new_text))
     path = [[0, 0]]
     i = j = 0
     for label, old_sentence, new_sentence, value in steps:

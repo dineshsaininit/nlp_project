@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from collections import Counter
 from xml.sax.saxutils import escape
-from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.tokenize import word_tokenize, PunktTokenizer
 from nltk.corpus import stopwords, wordnet
 from nltk.stem import WordNetLemmatizer, PorterStemmer
 from nltk.chunk import ne_chunker
@@ -67,27 +67,74 @@ short_names = {"nlp": "natural language processing", "ml": "machine learning", "
                "js": "javascript", "hr": "human resources", "ui": "user interface"}
 END_MARKS = (".", "!", "?", ":", ";")
 SUPPORTED_TYPES = (".txt", ".md", ".csv", ".pdf", ".docx", ".html", ".htm")
-month_pattern = r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,\s*\d{4})?\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:19|20)\d{2}\b"
+month_names = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+full_months = r"(?:january|february|march|april|june|july|august|september|october|november|december)"
+month_pattern = (r"\b\d{1,2}(?:st|nd|rd|th)?\s+" + month_names + r"(?:,?\s+\d{4})?(?![a-z])"
+                 + r"|\b" + month_names + r"\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b"
+                 + r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
+                 + r"|\b" + full_months + r"(?:\s+\d{4})?\b"
+                 + r"|\b(?:19|20)\d{2}\b")
+number_pattern = r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+(?:\.\d+)?%?"
+sentence_splitter = PunktTokenizer("english")
+sentence_splitter._params.abbrev_types.update({
+    "rs", "pvt", "ltd", "inc", "co", "corp", "dr", "mr", "mrs", "ms", "prof", "no", "nos", "vs", "etc", "approx", "dept",
+    "fig", "sec", "st", "jr", "sr", "b.tech", "m.tech", "b.sc", "m.sc", "b.e", "m.e", "b.com", "ph.d", "e.g", "i.e", "u.s",
+})
+BULLETS = "-*\u2022\u25aa\u25cf\u25e6\u2023\u2043\u00b7\uf0b7\uf0a7\x7f "
+PAGE_NUMBER = re.compile(r"^\s*(?:page\s*)?\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?\s*$", re.IGNORECASE)
+
+
+def tidy_text(text):
+    text = text.replace("\r", "\n").replace("\u00a0", " ")
+    for fancy, plain in [("\u2018", "'"), ("\u2019", "'"), ("\u201c", '"'), ("\u201d", '"'), ("\u2013", "-"), ("\u2014", "-"), ("\ufb01", "fi"), ("\ufb02", "fl")]:
+        text = text.replace(fancy, plain)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+    text = re.sub(r"([a-z])-\n([a-z])", r"\1\2", text)
+    return text
+
+
+def remove_page_furniture(pages):
+    def shape(line):
+        return re.sub(r"\d+", "#", line.strip().lower())
+
+    edges = Counter()
+    for page in pages:
+        lines = [line.strip() for line in page.split("\n") if line.strip()]
+        for line in set(lines[:3] + lines[-3:]):
+            edges[shape(line)] += 1
+    repeated = {key for key, count in edges.items() if count >= 2} if len(pages) >= 2 else set()
+    cleaned = []
+    for page in pages:
+        lines = [line for line in page.split("\n") if line.strip()]
+        keep = []
+        for index, line in enumerate(lines):
+            near_edge = index < 3 or index >= len(lines) - 3
+            if PAGE_NUMBER.match(line) or (near_edge and shape(line) in repeated):
+                continue
+            keep.append(line)
+        cleaned.append("\n".join(keep))
+    return "\n".join(cleaned)
 
 
 def read_bytes(file_name, data):
     extension = os.path.splitext(file_name)[1].lower()
     if extension == ".pdf":
         reader = PdfReader(io.BytesIO(data))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
+        pages = [tidy_text(page.extract_text() or "") for page in reader.pages]
+        return remove_page_furniture(pages)
     if extension == ".docx":
         word_file = WordDocument(io.BytesIO(data))
         lines = [paragraph.text for paragraph in word_file.paragraphs]
         for table in word_file.tables:
             for row in table.rows:
                 lines.append(" | ".join(box.text for box in row.cells))
-        return "\n".join(lines)
+        return tidy_text("\n".join(lines))
     text = data.decode("utf-8", errors="ignore")
     if extension in (".html", ".htm"):
         text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
         text = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</li>|</h\d>", "\n", text)
         text = re.sub(r"<[^>]+>", " ", text)
-    return text
+    return tidy_text(text)
 
 
 def read_path(path):
@@ -112,7 +159,7 @@ def clean_text(text):
 
 
 def split_sentences(text):
-    lines = [line.strip().strip("-*• ").strip() for line in clean_text(text).split("\n")]
+    lines = [line.strip().strip(BULLETS).strip() for line in clean_text(tidy_text(text)).split("\n")]
     blocks = []
     buffer = ""
     for index, line in enumerate(lines):
@@ -131,7 +178,7 @@ def split_sentences(text):
         blocks.append(buffer)
     sentences = []
     for block in blocks:
-        for sentence in sent_tokenize(block):
+        for sentence in sentence_splitter.tokenize(block):
             if len(sentence.strip()) > 2:
                 sentences.append(sentence.strip())
     return sentences
@@ -231,11 +278,12 @@ skill_taxonomy = {
     "Deep Learning": ["deep learning", "neural networks", "tensorflow", "pytorch"],
     "Natural Language Processing": ["natural language processing", "text mining", "text processing"],
     "Data Analysis": ["data analysis", "analysed data", "analyzed data", "pandas", "excel", "numpy"],
-    "Data Visualisation": ["tableau", "power bi", "dashboards", "data visualisation", "data visualization", "matplotlib"],
+    "Data Visualisation": ["tableau", "power bi", "data visualisation", "data visualization", "matplotlib", "seaborn", "plotly"],
     "Statistics": ["statistics", "statistical analysis", "probability"],
     "Testing": ["unit testing", "pytest", "selenium", "test automation"],
     "Project Management": ["project management", "agile", "scrum", "jira"],
-    "Communication": ["communication", "communication skills", "presentation skills", "public speaking"],
+    "Communication": ["communication", "communication skills", "presentation skills", "public speaking", "presented", "presenting",
+                      "presentation", "presentations", "explain results", "explaining results"],
     "Teamwork": ["teamwork", "team player", "work in a team", "collaboration"],
     "Leadership": ["leadership", "team lead", "mentoring"],
     "Problem Solving": ["problem solving", "analytical thinking", "critical thinking"],
@@ -248,6 +296,8 @@ skill_taxonomy = {
     "Polish Language": ["polish", "polish language"],
 }
 words_that_can_be_verbs = {"polish", "react", "node", "express", "teaching"}
+false_friends = {"leadership": ["leadership team", "leadership group", "the leadership"], "react": ["react quickly", "react to"],
+                 "presentation": ["presentation layer"], "excel": ["excel at", "excel in"]}
 phrase_to_skill = {}
 for skill_name, phrases in skill_taxonomy.items():
     for phrase in phrases:
@@ -271,6 +321,11 @@ def exact_skill_matches(tagged_words, found, rejected):
             if size == 1 and phrase in words_that_can_be_verbs and tagged_words[start][1].startswith("VB"):
                 rejected.append(f"'{phrase}' is used as a verb here, so it is not counted as a skill")
                 continue
+            context = " ".join(lower_words[max(0, start - 1):start + size + 2])
+            friend = next((item for item in false_friends.get(phrase, []) if item in context), None)
+            if friend:
+                rejected.append(f"'{phrase}' is part of '{friend}' here, so it is not counted as a skill")
+                continue
             if phrase_to_skill[phrase] not in found:
                 found[phrase_to_skill[phrase]] = phrase
 
@@ -285,7 +340,7 @@ class SkillFinder:
         tree = noun_phrase_grammar.parse(tagged_words)
         for subtree in tree.subtrees(filter=lambda part: part.label() == "PHRASE"):
             phrase = " ".join(word for word, tag in subtree.leaves()).lower()
-            if len(phrase) < 3:
+            if len(phrase) < 3 or any(friend in phrase for friends in false_friends.values() for friend in friends):
                 continue
             scores = cosine_matrix(self.vectorizer.transform([phrase]), self.taxonomy_vectors)[0]
             best = int(np.argmax(scores))
@@ -303,7 +358,51 @@ class SkillFinder:
         return found, rejected
 
 
+known_places = {
+    "india", "delhi", "new delhi", "mumbai", "bombay", "bengaluru", "bangalore", "pune", "hyderabad", "chennai", "kolkata", "gangtok",
+    "sikkim", "ahmedabad", "jaipur", "lucknow", "noida", "gurugram", "gurgaon", "chandigarh", "kochi", "indore", "bhopal", "patna",
+    "guwahati", "goa", "kerala", "karnataka", "maharashtra", "tamil nadu", "gujarat", "rajasthan", "punjab", "west bengal", "assam",
+    "london", "paris", "berlin", "tokyo", "singapore", "dubai", "new york", "california", "texas", "sydney", "toronto", "beijing",
+    "usa", "united states", "america", "uk", "united kingdom", "england", "germany", "france", "japan", "china", "canada",
+    "australia", "nepal", "bhutan", "bangladesh", "sri lanka", "europe", "asia", "africa",
+}
+organisation_words = {"pvt", "ltd", "limited", "inc", "corp", "corporation", "llc", "llp", "university", "college", "institute",
+                      "school", "bank", "company", "technologies", "solutions", "labs", "foundation", "department", "ministry", "agency"}
+not_entities = {"rs", "inr", "usd", "eur", "gbp", "page", "name", "email", "phone"}
+subjects = {"computer science", "information technology", "electronics", "mechanical engineering", "civil engineering",
+            "electrical engineering", "data science", "mathematics", "physics", "chemistry", "commerce", "economics", "statistics"}
+
+
+def find_name_line(text):
+    head_lines = [line.strip() for line in text.split("\n") if line.strip()][:6]
+    if not any("@" in line for line in head_lines):
+        return ""
+    for line in head_lines[:3]:
+        words = line.split()
+        if 2 <= len(words) <= 4 and all(word[:1].isupper() and word.replace(".", "").isalpha() for word in words) \
+                and not any(word.lower() in stop_words or word.lower() in phrase_to_skill for word in words):
+            return line
+    return ""
+
+
+def entity_label(words, label):
+    lowered = " ".join(words).lower()
+    plain = [word.lower().strip(".") for word in words]
+    if lowered in known_places or all(word in known_places for word in plain):
+        return "PLACE"
+    if any(word in organisation_words for word in plain):
+        return "ORGANIZATION" if len(words) > 1 else None
+    return label
+
+
 def is_real_entity(words, position, tagged, lowercase_words):
+    if " ".join(words).lower().strip(".") in not_entities:
+        return False
+    lowered = " ".join(words).lower()
+    if lowered in known_places:
+        return True
+    if lowered in subjects or any(phrase.startswith(lowered + " ") for phrase in taxonomy_phrases):
+        return False
     if len(words) == 1 and position == 0:
         return False
     if all(word.lower() in lowercase_words for word in words):
@@ -335,16 +434,36 @@ def find_entities(text, max_sentences=400):
             if not is_real_entity(words, start, tagged, lowercase_words):
                 continue
             entity = " ".join(words)
-            if part.label() == "PERSON":
+            label = entity_label(words, part.label())
+            if label is None:
+                continue
+            if label == "PERSON":
                 found["PERSON"][entity] += 1
-            elif part.label() in ("ORGANIZATION", "FACILITY"):
+            elif label in ("ORGANIZATION", "FACILITY"):
                 found["ORGANIZATION"][entity] += 1
-            elif part.label() in ("GPE", "LOCATION"):
+            elif label in ("GPE", "LOCATION", "PLACE"):
                 found["PLACE"][entity] += 1
-    found["EMAIL"].update(re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", text))
+    for place in known_places:
+        for match in re.finditer(r"\b" + re.escape(place) + r"\b", text, flags=re.IGNORECASE):
+            if match.group(0)[0].isupper() and match.group(0) not in found["PLACE"]:
+                found["PLACE"][match.group(0)] += 1
+                break
+    name = find_name_line(text)
+    if name:
+        name_words = name.split()
+        if True:
+            for other in list(found["PERSON"]):
+                if set(other.split()) <= set(name_words):
+                    del found["PERSON"][other]
+            for group in ("ORGANIZATION", "PLACE"):
+                for other in list(found[group]):
+                    if set(other.split()) <= set(name_words):
+                        del found[group][other]
+            found["PERSON"][name] += 1
+    found["EMAIL"].update(item.rstrip(".") for item in re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", text))
     found["URL"].update(re.findall(r"https?://\S+|www\.\S+", text))
-    found["DATE"].update(re.findall(month_pattern, text, flags=re.IGNORECASE))
-    found["MONEY"].update(re.findall(r"(?:rs\.?|inr|usd|\$|₹|€|£)\s?\d[\d,]*(?:\.\d+)?", text, flags=re.IGNORECASE))
+    found["DATE"].update(item.strip(" .,") for item in re.findall(month_pattern, text, flags=re.IGNORECASE))
+    found["MONEY"].update(item.strip() for item in re.findall(r"(?:rs\.?|inr|usd|\$|\u20b9|\u20ac|\u00a3)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:lakh|crore|k|million))?", text, flags=re.IGNORECASE))
     found["NUMBER"].update(re.findall(r"\b\d+(?:\.\d+)?\s?(?:%|percent|days|years|months|hours|weeks)\b", text, flags=re.IGNORECASE))
     return found
 
@@ -534,7 +653,7 @@ def strip_numbering(sentence):
 
 
 def numbers_in(text):
-    return set(re.findall(r"\b\d+(?:\.\d+)?%?", text))
+    return set(re.findall(number_pattern, text))
 
 
 def content_difference(old_sentence, new_sentence):
@@ -562,6 +681,10 @@ def needleman_wunsch(old_sentences, new_sentences, vectorizer):
         steps = [("REMOVED", s, "", 0.0) for s in old_sentences] + [("ADDED", "", s, 0.0) for s in new_sentences]
         return steps, np.zeros((1, 1))
     similarity = cosine_matrix(vectorizer.transform(old_sentences), vectorizer.transform(new_sentences))
+    for i, j in np.argwhere((similarity >= 0.2) & (similarity < MATCH_LEVEL)):
+        letters = difflib.SequenceMatcher(None, old_sentences[i].lower(), new_sentences[j].lower())
+        if letters.quick_ratio() >= 0.8:
+            similarity[i][j] = max(similarity[i][j], letters.ratio() * 0.95)
     rows = len(old_sentences) + 1
     cols = len(new_sentences) + 1
     score = np.zeros((rows, cols))
@@ -623,11 +746,15 @@ def semantic_relation(steps):
     return "Semantic Overlap", "a common core with unique parts on both sides"
 
 
+def word_key(word):
+    return word.strip(".,;:!?()[]'\"").lower()
+
+
 def word_changes(old_sentence, new_sentence):
     old_words = old_sentence.split()
     new_words = new_sentence.split()
     removed, added = [], []
-    for tag, a_start, a_end, b_start, b_end in difflib.SequenceMatcher(None, old_words, new_words).get_opcodes():
+    for tag, a_start, a_end, b_start, b_end in difflib.SequenceMatcher(None, [word_key(w) for w in old_words], [word_key(w) for w in new_words], autojunk=False).get_opcodes():
         if tag in ("replace", "delete"):
             removed.extend(old_words[a_start:a_end])
         if tag in ("replace", "insert"):
@@ -639,7 +766,7 @@ def word_diff_html(old_sentence, new_sentence):
     old_words = old_sentence.split()
     new_words = new_sentence.split()
     parts = []
-    for tag, a_start, a_end, b_start, b_end in difflib.SequenceMatcher(None, old_words, new_words).get_opcodes():
+    for tag, a_start, a_end, b_start, b_end in difflib.SequenceMatcher(None, [word_key(w) for w in old_words], [word_key(w) for w in new_words], autojunk=False).get_opcodes():
         if tag == "equal":
             parts.append(escape(" ".join(old_words[a_start:a_end])))
         if tag in ("replace", "delete"):
@@ -653,10 +780,19 @@ def lexical_diff_count(old_lines, new_lines):
     return sum(1 for line in difflib.ndiff(old_lines, new_lines) if line.startswith(("+ ", "- ")))
 
 
+def vectorizer_for(corpus, *texts):
+    known = set(corpus.documents.values())
+    if all(text in known for text in texts):
+        return corpus.vectorizer
+    extra = [sentence for text in texts for sentence in split_sentences(text)]
+    return TextVectorizer().fit(corpus.all_sentences + extra + list(texts))
+
+
 def compare_texts(corpus, old_text, new_text, old_name="first", new_name="second"):
     old_sentences = [strip_numbering(s) for s in split_sentences(old_text)]
     new_sentences = [strip_numbering(s) for s in split_sentences(new_text)]
-    steps, matrix = needleman_wunsch(old_sentences, new_sentences, corpus.vectorizer)
+    vectorizer = vectorizer_for(corpus, old_text, new_text)
+    steps, matrix = needleman_wunsch(old_sentences, new_sentences, vectorizer)
     counts = Counter(step[0] for step in steps)
     relation, meaning = semantic_relation(steps)
     in_corpus = old_name in corpus.names and new_name in corpus.names
@@ -667,7 +803,7 @@ def compare_texts(corpus, old_text, new_text, old_name="first", new_name="second
     return {
         "old": old_name,
         "new": new_name,
-        "similarity": round(corpus.doc_similarity(old_name, new_name) if in_corpus else corpus.text_similarity(old_text, new_text), 3),
+        "similarity": round(corpus.doc_similarity(old_name, new_name) if in_corpus else float(cosine_matrix(*[vectorizer.transform([t]) for t in (old_text, new_text)])[0][0]), 3),
         "relation": relation,
         "relation meaning": meaning,
         "steps": steps,
@@ -692,8 +828,11 @@ gender_words = r"\b(he|she|him|her|his|hers|mr|mrs|ms|miss|male|female|man|woman
 
 
 def remove_personal_details(text):
+    name = find_name_line(text)
     lines = [line for line in text.split("\n") if line.strip()]
-    if lines and len(lines[0].split()) <= 4 and not re.search(r"\d|:", lines[0]):
+    if name:
+        lines = [line for line in lines if line.strip() != name]
+    elif lines and len(lines[0].split()) <= 4 and not re.search(r"\d|:", lines[0]):
         lines = lines[1:]
     text = "\n".join(lines)
     text = re.sub(r"(?im)^\s*(name|gender|sex|age|date of birth|dob|nationality|religion|caste|marital status|address)\s*:.*$", "", text)
@@ -702,17 +841,28 @@ def remove_personal_details(text):
     return re.sub(gender_words, "", text, flags=re.IGNORECASE)
 
 
-def requirement_coverage(corpus, job_text, resume_text, threshold=0.20):
-    requirements = [s for s in split_sentences(job_text) if len(s.split()) >= 7]
-    resume_sentences = split_sentences(resume_text)
+def requirement_coverage(corpus, job_text, resume_text, threshold=0.30, resume_skills=None):
+    requirements = [s for s in split_sentences(job_text) if len(s.split()) >= 6 and "|" not in s]
+    lines = split_sentences(resume_text)
+    resume_sentences = [s for s in lines if len(s.split()) >= 4] or lines
     if not requirements or not resume_sentences:
         return 0.0, []
+    evidence = dict(resume_skills) if resume_skills is not None else corpus.skill_finder.extract(resume_text)[0]
+    have = set(evidence)
     similarity = cosine_matrix(corpus.vectorizer.transform(requirements), corpus.vectorizer.transform(resume_sentences))
     rows = []
     for index, requirement in enumerate(requirements):
         best = int(similarity[index].argmax())
-        score = float(similarity[index][best])
-        rows.append({"requirement": requirement, "best resume line": resume_sentences[best], "score": round(score, 3), "covered": score >= threshold})
+        wording = float(similarity[index][best])
+        needed = set(corpus.skill_finder.extract(requirement)[0])
+        skill_share = len(needed & have) / len(needed) if needed else 0.0
+        score = max(wording, skill_share)
+        line = resume_sentences[best]
+        if skill_share > wording:
+            clues = [str(evidence[skill]).split(" (similarity")[0].lower() for skill in needed & have]
+            line = next((s for s in lines if any(clue in s.lower() for clue in clues)), line)
+        rows.append({"requirement": requirement, "best resume line": line, "skills asked": ", ".join(sorted(needed)),
+                     "skills found": ", ".join(sorted(needed & have)), "score": round(score, 3), "covered": score >= threshold})
     return sum(row["covered"] for row in rows) / len(rows), rows
 
 
@@ -722,7 +872,7 @@ def match_resume(corpus, job_text, resume_text):
     resume_skills, rejected = corpus.skill_finder.extract(safe_text)
     needed, have = set(job_skills), set(resume_skills)
     skill_score = len(needed & have) / len(needed) if needed else 0.0
-    coverage, coverage_rows = requirement_coverage(corpus, job_text, safe_text)
+    coverage, coverage_rows = requirement_coverage(corpus, job_text, safe_text, resume_skills=resume_skills)
     text_score = corpus.text_similarity(job_text, safe_text)
     final_score = 0.6 * skill_score + 0.25 * coverage + 0.15 * text_score if needed else 0.6 * coverage + 0.4 * text_score
     return {
@@ -740,7 +890,10 @@ replacement_names = ["Alex Morgan", "Priya Sharma", "Mohammed Ali", "Chen Wei", 
 def make_counterfactual(text, new_name):
     first_line = next((line for line in text.split("\n") if line.strip()), "").strip()
     people = []
-    if first_line and len(first_line.split()) <= 4 and not re.search(r"\d|:", first_line):
+    name = find_name_line(text)
+    if name:
+        people.append(name)
+    elif first_line and len(first_line.split()) <= 4 and not re.search(r"\d|:", first_line):
         people.append(first_line)
     name_line = re.search(r"(?im)^\s*name\s*:\s*(.+)$", text)
     if name_line:
@@ -988,7 +1141,7 @@ def word_pairs(text, top=10):
 
 document_type_clues = {
     "Resume or CV": "resume curriculum vitae experience skills education project worked built developed email phone linkedin summary internship",
-    "Job description": "job role responsibilities requirements candidate looking hiring apply qualifications preferred required salary position join",
+    "Job description": "job description role responsibilities requirements candidate looking hiring apply qualifications preferred required salary position join experience knowledge familiarity nice plus strong excellent",
     "Policy or legal": "policy shall must employee employees rules compliance agreement terms conditions clause leave applies company law allowed",
     "Academic or syllabus": "course unit syllabus students semester exam assessment lecture module credits learning outcomes chapter introduction",
     "News or article": "said reported according year growing world government people million percent new country market expected",
@@ -1073,9 +1226,15 @@ def sentiment_arc(text):
     return pd.DataFrame(rows, columns=["position", "sentence", "score", "mood"])
 
 
-question_types = [("how many", "NUMBER"), ("how much", "NUMBER"), ("what percent", "NUMBER"), ("when", "DATE"),
-                  ("what year", "DATE"), ("who", "PERSON"), ("where", "PLACE"), ("which company", "ORGANIZATION")]
-number_answer = r"\b\d+(?:[.,]\d+)?\s?(?:%|percent|days?|years?|months?|hours?|weeks?|people|million|billion)?"
+question_types = [("how much", "MONEY"), ("cost", "MONEY"), ("price", "MONEY"), ("salary", "MONEY"), ("fee", "MONEY"),
+                  ("reimburse", "MONEY"), ("budget", "MONEY"), ("how many", "NUMBER"), ("what percent", "NUMBER"), ("how long", "NUMBER"),
+                  ("what year", "DATE"), ("what date", "DATE"), ("which month", "DATE"), ("when", "DATE"), ("who", "PERSON"),
+                  ("whom", "PERSON"), ("where", "PLACE"), ("which city", "PLACE"), ("which company", "ORGANIZATION"),
+                  ("which organisation", "ORGANIZATION"), ("which organization", "ORGANIZATION"), ("programming language", "SKILL"),
+                  ("which skill", "SKILL"), ("what skill", "SKILL"), ("which tool", "SKILL"), ("what tool", "SKILL"),
+                  ("framework", "SKILL"), ("technolog", "SKILL")]
+number_answer = r"(?:\b\d{1,3}(?:,\d{3})+|\b\d+(?:\.\d+)?)\s?(?:%|percent|days?|years?|months?|hours?|weeks?|people|members|employees|million|billion|lakh|crore)?"
+money_answer = r"(?:rs\.?|inr|usd|\$|\u20b9|\u20ac|\u00a3)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:lakh|crore|k|million|per month|per year|a month|a year))?"
 
 
 def question_type(question):
@@ -1086,26 +1245,49 @@ def question_type(question):
     return "GENERAL"
 
 
-def answer_question(question, store, top_k=3, only_from=None):
-    results = store.search(question, top_k=top_k, only_from=only_from)
-    if not results:
-        return {"question type": question_type(question), "short answer": "", "answer sentence": "", "source": "",
-                "score": 0.0, "matched words": [], "other results": []}
-    best = results[0]
-    kind = question_type(question)
-    short_answer = ""
+def short_answer_from(kind, sentence, question=""):
+    if kind == "MONEY":
+        found = re.findall(money_answer, sentence, flags=re.IGNORECASE)
+        return found[0].strip() if found else ""
     if kind == "NUMBER":
-        found = [item.strip() for item in re.findall(number_answer, best["text"]) if item.strip()]
-        short_answer = found[0] if found else ""
-    elif kind == "DATE":
-        found = re.findall(month_pattern, best["text"], flags=re.IGNORECASE)
-        short_answer = found[0] if found else ""
-    elif kind in ("PERSON", "PLACE", "ORGANIZATION"):
-        found = find_entities(best["text"])[kind]
-        short_answer = found.most_common(1)[0][0] if found else ""
-    matched = sorted(set(get_tokens(question)) & set(get_tokens(best["text"])))
+        asked = set(get_tokens(question))
+        found = [item.strip() for item in re.findall(number_answer, sentence) if item.strip()]
+        found = [item for item in found if not re.fullmatch(r"(?:19|20)\d{2}", item)] or found
+        with_unit = [item for item in found if any(lemmatizer.lemmatize(word.lower()) in asked for word in item.split()[1:])]
+        return (with_unit or [item for item in found if " " in item] or found or [""])[0]
+    if kind == "DATE":
+        found = re.findall(month_pattern, sentence, flags=re.IGNORECASE)
+        return found[0].strip(" .,") if found else ""
+    if kind == "SKILL":
+        found = {}
+        exact_skill_matches(tag_sentence(sentence), found, [])
+        return ", ".join(found.keys())
+    if kind in ("PERSON", "PLACE", "ORGANIZATION"):
+        found = find_entities(sentence)[kind]
+        return found.most_common(1)[0][0] if found else ""
+    return ""
+
+
+def answer_question(question, store, top_k=3, only_from=None):
+    kind = question_type(question)
+    candidates = store.search(question, top_k=max(top_k, 10), only_from=only_from)
+    if not candidates:
+        return {"question type": kind, "short answer": "", "answer sentence": "", "source": "",
+                "score": 0.0, "matched words": [], "other results": []}
+    asked = set(get_tokens(question))
+    highest = candidates[0]["score"]
+    ranked = []
+    for item in candidates:
+        answer = short_answer_from(kind, item["text"], question) if kind != "GENERAL" else ""
+        overlap = len(asked & set(get_tokens(item["text"]))) / max(len(asked), 1)
+        usable = bool(answer) and item["score"] >= 0.35 * highest
+        ranked.append((usable, item["score"] + 0.1 * overlap, answer, item))
+    ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    usable, best_score, short_answer, best = ranked[0]
+    others = [item for flag, score, answer, item in ranked[1:top_k]]
+    matched = sorted(asked & set(get_tokens(best["text"])))
     return {"question type": kind, "short answer": short_answer, "answer sentence": best["text"], "source": best["source"],
-            "score": best["score"], "matched words": matched, "other results": results[1:]}
+            "score": best["score"], "matched words": matched, "other results": others}
 
 
 def redact_text(text):
@@ -1118,6 +1300,10 @@ def redact_text(text):
     text = mask(r"[\w.+-]+@[\w-]+\.[\w.]+", "EMAIL", text)
     text = mask(r"https?://\S+|www\.\S+", "URL", text)
     text = mask(r"\+?\d[\d\s-]{8,}\d", "PHONE", text)
+    name = find_name_line(text.replace("[EMAIL]", "@"))
+    if name:
+        counts["PERSON"] += text.count(name)
+        text = text.replace(name, "[PERSON]")
     name_lines = re.findall(r"(?im)^\s*name\s*:\s*(.+)$", text)
     people = set(name.strip() for name in name_lines) | set(find_entities(text)["PERSON"].keys())
     for person in sorted(people, key=len, reverse=True):
@@ -1281,7 +1467,10 @@ def overview_table(corpus):
 
 
 def run_self_tests(corpus):
-    vectorizer = corpus.vectorizer
+    test_lines = ["Intro to the course.", "Tokenization basics.", "Language models and smoothing.", "Word embeddings such as GloVe.",
+                  "Employees get 12 days of leave.", "Employees get 15 days of leave.",
+                  "Text preprocessing including tokenization and stopword removal.", "Text preprocesing includng tokenizaton and stopword remval."]
+    vectorizer = TextVectorizer().fit(corpus.all_sentences + test_lines)
     finder = corpus.skill_finder
 
     def test_tokens():
